@@ -1,0 +1,341 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+import threading
+from utils.api_client import GitHubAPIClient
+from utils.favorites_manager import FavoritesManager
+from PIL import Image, ImageTk
+import requests
+from io import BytesIO
+import webbrowser
+
+
+class GitHubUserFinder:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("GitHub User Finder")
+        self.root.geometry("800x600")
+        self.root.minsize(700, 500)
+        
+        # Инициализация клиентов
+        self.api_client = GitHubAPIClient()
+        self.favorites_manager = FavoritesManager()
+        
+        # Стилизация
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+        self.style.configure('Search.TButton', font=('Segoe UI', 10))
+        self.style.configure('Favorite.TButton', font=('Segoe UI', 9))
+        
+        # Переменные
+        self.current_user_data = None
+        self.avatar_image = None
+        
+        self.setup_ui()
+        self.load_favorites()
+        
+    def setup_ui(self):
+        """Настройка пользовательского интерфейса"""
+        # Главный контейнер
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Настройка grid весов
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(1, weight=1)
+        main_frame.rowconfigure(2, weight=1)
+        
+        # Заголовок
+        title_label = ttk.Label(main_frame, text="GitHub User Finder", 
+                                font=('Segoe UI', 16, 'bold'))
+        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 15))
+        
+        # Поле поиска
+        search_frame = ttk.Frame(main_frame)
+        search_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+        search_frame.columnconfigure(0, weight=1)
+        
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, 
+                                      font=('Segoe UI', 11))
+        self.search_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
+        self.search_entry.bind('<Return>', lambda e: self.search_user())
+        
+        search_btn = ttk.Button(search_frame, text="🔍 Поиск", 
+                                command=self.search_user, style='Search.TButton')
+        search_btn.grid(row=0, column=1)
+        
+        clear_btn = ttk.Button(search_frame, text="Очистить", 
+                               command=self.clear_search)
+        clear_btn.grid(row=0, column=2, padx=(5, 0))
+        
+        # Левая панель - информация о пользователе
+        left_frame = ttk.LabelFrame(main_frame, text="Информация о пользователе", padding="10")
+        left_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 5))
+        left_frame.columnconfigure(0, weight=1)
+        
+        # Аватар
+        self.avatar_label = ttk.Label(left_frame)
+        self.avatar_label.grid(row=0, column=0, pady=(0, 10))
+        
+        # Информация о пользователе
+        self.info_frame = ttk.Frame(left_frame)
+        self.info_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        self.info_frame.columnconfigure(1, weight=1)
+        
+        self.username_label = ttk.Label(self.info_frame, text="", font=('Segoe UI', 12, 'bold'))
+        self.username_label.grid(row=0, column=0, columnspan=2, pady=(0, 10))
+        
+        info_labels = [
+            ("Имя:", "name"),
+            ("Компания:", "company"),
+            ("Местоположение:", "location"),
+            ("Email:", "email"),
+            ("Репозитории:", "public_repos"),
+            ("Подписчики:", "followers"),
+            ("Подписки:", "following"),
+            ("Аккаунт создан:", "created_at")
+        ]
+        
+        self.info_vars = {}
+        for i, (label_text, key) in enumerate(info_labels):
+            label = ttk.Label(self.info_frame, text=label_text, font=('Segoe UI', 9, 'bold'))
+            label.grid(row=i+1, column=0, sticky=tk.W, pady=2)
+            
+            var = tk.StringVar(value="-")
+            self.info_vars[key] = var
+            value_label = ttk.Label(self.info_frame, textvariable=var, font=('Segoe UI', 9))
+            value_label.grid(row=i+1, column=1, sticky=tk.W, pady=2, padx=(10, 0))
+        
+        # Кнопки действий
+        button_frame = ttk.Frame(left_frame)
+        button_frame.grid(row=2, column=0, pady=(15, 0))
+        
+        self.favorite_btn = ttk.Button(button_frame, text="⭐ В избранное", 
+                                       command=self.toggle_favorite, state='disabled')
+        self.favorite_btn.grid(row=0, column=0, padx=(0, 5))
+        
+        open_profile_btn = ttk.Button(button_frame, text="🌐 Открыть профиль", 
+                                      command=self.open_profile)
+        open_profile_btn.grid(row=0, column=1)
+        
+        # Правая панель - избранные пользователи
+        right_frame = ttk.LabelFrame(main_frame, text="⭐ Избранные пользователи", padding="10")
+        right_frame.grid(row=2, column=1, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(5, 0))
+        right_frame.columnconfigure(0, weight=1)
+        right_frame.rowconfigure(0, weight=1)
+        
+        # Список избранных
+        list_frame = ttk.Frame(right_frame)
+        list_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        
+        self.favorites_listbox = tk.Listbox(list_frame, 
+                                            yscrollcommand=scrollbar.set,
+                                            font=('Segoe UI', 10),
+                                            selectmode=tk.SINGLE,
+                                            height=20)
+        self.favorites_listbox.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.favorites_listbox.bind('<Double-Button-1>', self.load_favorite_user)
+        
+        scrollbar.config(command=self.favorites_listbox.yview)
+        
+        # Кнопки управления избранными
+        fav_buttons_frame = ttk.Frame(right_frame)
+        fav_buttons_frame.grid(row=1, column=0, pady=(10, 0))
+        
+        remove_fav_btn = ttk.Button(fav_buttons_frame, text="Удалить из избранного", 
+                                    command=self.remove_favorite)
+        remove_fav_btn.grid(row=0, column=0)
+        
+        # Статус бар
+        self.status_var = tk.StringVar(value="Готов к работе")
+        status_bar = ttk.Label(main_frame, textvariable=self.status_var, 
+                               relief=tk.SUNKEN, anchor=tk.W)
+        status_bar.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(10, 0))
+        
+    def search_user(self):
+        """Поиск пользователя GitHub"""
+        username = self.search_var.get().strip()
+        
+        if not username:
+            messagebox.showwarning("Предупреждение", "Введите имя пользователя для поиска")
+            return
+        
+        self.status_var.set(f"Поиск пользователя {username}...")
+        self.favorite_btn.config(state='disabled')
+        
+        # Запуск поиска в отдельном потоке
+        threading.Thread(target=self._search_user_thread, args=(username,), daemon=True).start()
+    
+    def _search_user_thread(self, username):
+        """Поиск пользователя в отдельном потоке"""
+        try:
+            user_data = self.api_client.get_user(username)
+            
+            # Обновление UI в главном потоке
+            self.root.after(0, self._update_user_info, user_data)
+            
+        except Exception as e:
+            self.root.after(0, self._show_error, f"Ошибка при поиске: {str(e)}")
+    
+    def _update_user_info(self, user_data):
+        """Обновление информации о пользователе в UI"""
+        self.current_user_data = user_data
+        
+        # Обновление текстовых полей
+        self.username_label.config(text=f"@{user_data.get('login', '')}")
+        
+        # Форматирование даты создания
+        created_at = user_data.get('created_at', '-')
+        if created_at != '-':
+            created_at = created_at.split('T')[0]
+        
+        # Обновление значений
+        info_mapping = {
+            'name': user_data.get('name', '-'),
+            'company': user_data.get('company', '-'),
+            'location': user_data.get('location', '-'),
+            'email': user_data.get('email', '-'),
+            'public_repos': user_data.get('public_repos', 0),
+            'followers': user_data.get('followers', 0),
+            'following': user_data.get('following', 0),
+            'created_at': created_at
+        }
+        
+        for key, value in info_mapping.items():
+            if key in self.info_vars:
+                self.info_vars[key].set(str(value) if value else "-")
+        
+        # Загрузка аватара
+        avatar_url = user_data.get('avatar_url')
+        if avatar_url:
+            self.load_avatar(avatar_url)
+        
+        # Проверка, находится ли пользователь в избранном
+        is_favorite = self.favorites_manager.is_favorite(user_data['login'])
+        self.update_favorite_button(is_favorite)
+        
+        self.favorite_btn.config(state='normal')
+        self.status_var.set(f"Пользователь @{user_data['login']} найден")
+    
+    def load_avatar(self, url):
+        """Загрузка аватара пользователя"""
+        try:
+            response = requests.get(url)
+            img = Image.open(BytesIO(response.content))
+            img = img.resize((100, 100), Image.Resampling.LANCZOS)
+            self.avatar_image = ImageTk.PhotoImage(img)
+            self.avatar_label.config(image=self.avatar_image)
+        except Exception as e:
+            print(f"Ошибка загрузки аватара: {e}")
+    
+    def toggle_favorite(self):
+        """Добавление/удаление из избранного"""
+        if not self.current_user_data:
+            return
+        
+        username = self.current_user_data['login']
+        
+        if self.favorites_manager.is_favorite(username):
+            self.favorites_manager.remove_favorite(username)
+            self.update_favorite_button(False)
+            self.status_var.set(f"Пользователь @{username} удален из избранного")
+        else:
+            favorite_data = {
+                'login': username,
+                'name': self.current_user_data.get('name', ''),
+                'avatar_url': self.current_user_data.get('avatar_url', ''),
+                'html_url': self.current_user_data.get('html_url', '')
+            }
+            self.favorites_manager.add_favorite(favorite_data)
+            self.update_favorite_button(True)
+            self.status_var.set(f"Пользователь @{username} добавлен в избранное")
+        
+        self.load_favorites()
+    
+    def update_favorite_button(self, is_favorite):
+        """Обновление текста кнопки избранного"""
+        if is_favorite:
+            self.favorite_btn.config(text="❌ Удалить из избранного")
+        else:
+            self.favorite_btn.config(text="⭐ В избранное")
+    
+    def load_favorites(self):
+        """Загрузка списка избранных пользователей"""
+        self.favorites_listbox.delete(0, tk.END)
+        favorites = self.favorites_manager.get_favorites()
+        
+        for username, data in favorites.items():
+            display_name = f"@{username}"
+            if data.get('name'):
+                display_name += f" - {data['name']}"
+            self.favorites_listbox.insert(tk.END, display_name)
+    
+    def load_favorite_user(self, event=None):
+        """Загрузка пользователя из избранного"""
+        selection = self.favorites_listbox.curselection()
+        if not selection:
+            return
+        
+        selected_text = self.favorites_listbox.get(selection[0])
+        username = selected_text.split(' - ')[0].replace('@', '')
+        
+        self.search_var.set(username)
+        self.search_user()
+    
+    def remove_favorite(self):
+        """Удаление выбранного пользователя из избранного"""
+        selection = self.favorites_listbox.curselection()
+        if not selection:
+            messagebox.showinfo("Информация", "Выберите пользователя для удаления")
+            return
+        
+        selected_text = self.favorites_listbox.get(selection[0])
+        username = selected_text.split(' - ')[0].replace('@', '')
+        
+        if messagebox.askyesno("Подтверждение", f"Удалить @{username} из избранного?"):
+            self.favorites_manager.remove_favorite(username)
+            self.load_favorites()
+            
+            if self.current_user_data and self.current_user_data['login'] == username:
+                self.update_favorite_button(False)
+            
+            self.status_var.set(f"Пользователь @{username} удален из избранного")
+    
+    def open_profile(self):
+        """Открытие профиля в браузере"""
+        if self.current_user_data and 'html_url' in self.current_user_data:
+            webbrowser.open(self.current_user_data['html_url'])
+    
+    def clear_search(self):
+        """Очистка результатов поиска"""
+        self.search_var.set("")
+        self.username_label.config(text="")
+        for var in self.info_vars.values():
+            var.set("-")
+        self.avatar_label.config(image="")
+        self.avatar_image = None
+        self.current_user_data = None
+        self.favorite_btn.config(state='disabled')
+        self.status_var.set("Готов к работе")
+    
+    def _show_error(self, message):
+        """Отображение ошибки"""
+        messagebox.showerror("Ошибка", message)
+        self.status_var.set("Ошибка при выполнении операции")
+        self.favorite_btn.config(state='disabled')
+
+
+def main():
+    root = tk.Tk()
+    app = GitHubUserFinder(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
